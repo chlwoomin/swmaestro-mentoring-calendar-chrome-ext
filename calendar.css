@@ -59,7 +59,12 @@
   font-weight: 700;
   font-size: 14px;
 }
-#swm-close {
+.swm-header-btns {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+#swm-close, #swm-refresh {
   background: transparent;
   border: none;
   color: rgba(255,255,255,.8);
@@ -68,9 +73,12 @@
   line-height: 1;
   padding: 2px 4px;
   border-radius: 4px;
-  transition: color .15s;
+  transition: color .15s, transform .3s;
 }
-#swm-close:hover { color: #fff; }
+#swm-close:hover, #swm-refresh:hover { color: #fff; }
+#swm-refresh { font-size: 18px; }
+#swm-refresh.spinning { animation: swm-rotate 0.6s linear infinite; }
+#swm-refresh:disabled { cursor: wait; }
 
 /* ── 달력 바디 ───────────────────────────────────────── */
 #swm-cal-body {
