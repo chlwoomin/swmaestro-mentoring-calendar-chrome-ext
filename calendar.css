@@ -1,0 +1,242 @@
+/* ── FAB 버튼 ───────────────────────────────────────── */
+#swm-fab {
+  position: fixed;
+  bottom: 28px;
+  right: 28px;
+  z-index: 99998;
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  border: none;
+  background: #1a56db;
+  color: #fff;
+  cursor: pointer;
+  box-shadow: 0 4px 16px rgba(26,86,219,.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background .2s, transform .15s;
+}
+#swm-fab:hover { background: #1347c0; transform: scale(1.07); }
+#swm-fab svg { width: 24px; height: 24px; }
+#swm-fab.loading { background: #6b8fd8; cursor: wait; }
+#swm-fab.loading:hover { background: #6b8fd8; transform: none; }
+.swm-spin { animation: swm-rotate 1s linear infinite; }
+@keyframes swm-rotate { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+/* ── 팝업 컨테이너 ───────────────────────────────────── */
+#swm-popup {
+  position: fixed;
+  bottom: 90px;
+  right: 28px;
+  z-index: 99999;
+  width: 360px;
+  max-height: 620px;
+  background: #fff;
+  border-radius: 16px;
+  box-shadow: 0 8px 40px rgba(0,0,0,.18);
+  overflow: hidden;
+  display: none;
+  flex-direction: column;
+  font-family: 'Pretendard', 'Apple SD Gothic Neo', sans-serif;
+  font-size: 13px;
+}
+#swm-popup.open { display: flex; animation: swm-fadeup .2s ease; }
+
+@keyframes swm-fadeup {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ── 팝업 헤더 ───────────────────────────────────────── */
+.swm-popup-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px 12px;
+  background: #1a56db;
+  color: #fff;
+  font-weight: 700;
+  font-size: 14px;
+}
+#swm-close {
+  background: transparent;
+  border: none;
+  color: rgba(255,255,255,.8);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 4px;
+  transition: color .15s;
+}
+#swm-close:hover { color: #fff; }
+
+/* ── 달력 바디 ───────────────────────────────────────── */
+#swm-cal-body {
+  overflow-y: auto;
+  padding: 8px 10px 12px;
+}
+
+/* ── 월 이동 헤더 ────────────────────────────────────── */
+.swm-cal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  padding: 0 4px;
+}
+.swm-month-title {
+  font-weight: 700;
+  font-size: 15px;
+  color: #1e2a3b;
+}
+.swm-nav {
+  background: none;
+  border: 1px solid #e0e5f0;
+  border-radius: 6px;
+  width: 28px;
+  height: 28px;
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  color: #555;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background .15s;
+}
+.swm-nav:hover { background: #f0f4ff; }
+
+/* ── 달력 그리드 ─────────────────────────────────────── */
+.swm-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 2px;
+}
+
+/* 요일 레이블 */
+.swm-day-label {
+  text-align: center;
+  font-size: 11px;
+  font-weight: 700;
+  color: #888;
+  padding: 4px 0;
+}
+.swm-day-label.sun { color: #e53e3e; }
+.swm-day-label.sat { color: #3182ce; }
+
+/* 날짜 셀 */
+.swm-cell {
+  border-radius: 8px;
+  min-height: 48px;
+  padding: 4px 3px 3px;
+  cursor: default;
+  position: relative;
+  transition: background .12s;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.swm-cell.has-event { cursor: pointer; }
+.swm-cell.has-event:hover { background: #f0f4ff; }
+.swm-cell.selected { background: #e8f0fe !important; outline: 2px solid #1a56db; }
+.swm-cell.today .swm-dnum {
+  background: #1a56db;
+  color: #fff;
+  border-radius: 50%;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.swm-cell.sun .swm-dnum { color: #e53e3e; }
+.swm-cell.sat .swm-dnum { color: #3182ce; }
+.swm-cell.today .swm-dnum { color: #fff !important; }
+
+.swm-dnum {
+  font-size: 12px;
+  font-weight: 600;
+  color: #2d3748;
+  line-height: 22px;
+  min-width: 22px;
+  text-align: center;
+}
+
+/* 이벤트 도트 */
+.swm-dots {
+  display: flex;
+  gap: 3px;
+  margin-top: 2px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+.swm-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #1a56db;
+  display: inline-block;
+}
+
+/* 이벤트 뱃지 (모바일 대응용, 텍스트 생략) */
+.swm-badge {
+  display: none; /* 달력 셀이 좁아서 숨김, 상세패널 활용 */
+}
+
+/* ── 상세 패널 ───────────────────────────────────────── */
+.swm-detail {
+  margin-top: 8px;
+  border-top: 1px solid #eef0f6;
+  padding-top: 8px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.swm-detail-hint {
+  text-align: center;
+  color: #aaa;
+  font-size: 12px;
+  padding: 12px 0;
+}
+.swm-detail-date {
+  font-size: 12px;
+  font-weight: 700;
+  color: #1a56db;
+  margin-bottom: 6px;
+  padding: 0 2px;
+}
+.swm-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #f7f9ff;
+  margin-bottom: 6px;
+  text-decoration: none;
+  color: inherit;
+  border: 1px solid #e5eaf8;
+  transition: background .12s;
+}
+.swm-item:hover { background: #edf2ff; }
+.swm-item-type {
+  font-size: 10px;
+  color: #fff;
+  background: #1a56db;
+  border-radius: 4px;
+  padding: 1px 6px;
+  display: inline-block;
+  width: fit-content;
+  font-weight: 600;
+}
+.swm-item-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #1e2a3b;
+  line-height: 1.4;
+}
+.swm-item-meta {
+  font-size: 11px;
+  color: #888;
+}
