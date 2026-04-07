@@ -97,21 +97,40 @@
     return { html, map };
   }
 
-  // ── 4. 상세 패널 ────────────────────────────────────────────────
+  // ── 4. 구글 캘린더 URL 생성 ──────────────────────────────────────
+  function googleCalUrl(l) {
+    const [start, end] = l.time.split('~').map(s => s.trim());
+    const fmt = (t) => l.date.replace(/-/g, '') + 'T' + t.split(':').map(v => v.padStart(2,'0')).join('') + '00';
+    const dates = start && end ? `${fmt(start)}/${fmt(end)}` : l.date.replace(/-/g, '');
+    const text = encodeURIComponent(`[소마] ${l.title}`);
+    const details = encodeURIComponent(`${l.type} · ${l.author}\n${l.href}`);
+    return `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${text}&dates=${dates}&details=${details}`;
+  }
+
+  // ── 5. 상세 패널 ────────────────────────────────────────────────
   function renderDetail(el, items, ds) {
     if (!items || !items.length) {
       el.innerHTML = `<p class="swm-detail-hint">이 날은 접수된 강의가 없습니다.</p>`;
       return;
     }
     el.innerHTML = `<p class="swm-detail-date">${ds.replace(/-/g,'.')} 강의 (${items.length}건)</p>
-      ${items.map(l => `<a class="swm-item" href="${l.href}" target="_blank">
-        <span class="swm-item-type">${l.type}</span>
-        <span class="swm-item-title">${l.title}</span>
-        <span class="swm-item-meta">${l.author} · ${l.time}</span>
-      </a>`).join('')}`;
+      ${items.map(l => `<div class="swm-item-wrap">
+        <a class="swm-item" href="${l.href}" target="_blank">
+          <span class="swm-item-type">${l.type}</span>
+          <span class="swm-item-title">${l.title}</span>
+          <span class="swm-item-meta">${l.author} · ${l.time}</span>
+        </a>
+        <a class="swm-gcal-btn" href="${googleCalUrl(l)}" target="_blank" title="구글 캘린더에 추가">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/>
+            <line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>
+            <line x1="12" y1="14" x2="12" y2="18"/><line x1="10" y1="16" x2="14" y2="16"/>
+          </svg>
+        </a>
+      </div>`).join('')}`;
   }
 
-  // ── 5. UI 마운트 ────────────────────────────────────────────────
+  // ── 6. UI 마운트 ────────────────────────────────────────────────
   function mount(lectures) {
     document.getElementById('swm-ext-root')?.remove();
 
@@ -204,7 +223,7 @@
     };
   }
 
-  // ── 6. 로딩 FAB ─────────────────────────────────────────────────
+  // ── 7. 로딩 FAB ─────────────────────────────────────────────────
   function showLoader() {
     document.getElementById('swm-ext-root')?.remove();
     const root = document.createElement('div');
@@ -218,7 +237,7 @@
     document.body.appendChild(root);
   }
 
-  // ── 7. 진입점 ────────────────────────────────────────────────────
+  // ── 8. 진입점 ────────────────────────────────────────────────────
   async function init() {
     if (!location.pathname.includes('/mypage/')) return;
     if (!sessionStorage.getItem(CACHE_KEY)) showLoader();

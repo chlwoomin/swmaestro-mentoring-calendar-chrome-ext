@@ -214,20 +214,42 @@
   margin-bottom: 6px;
   padding: 0 2px;
 }
+.swm-item-wrap {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  margin-bottom: 6px;
+  border-radius: 8px;
+  border: 1px solid #e5eaf8;
+  overflow: hidden;
+}
 .swm-item {
   display: flex;
   flex-direction: column;
   gap: 2px;
   padding: 8px 10px;
-  border-radius: 8px;
+  flex: 1;
+  min-width: 0;
   background: #f7f9ff;
-  margin-bottom: 6px;
   text-decoration: none;
   color: inherit;
-  border: 1px solid #e5eaf8;
   transition: background .12s;
 }
 .swm-item:hover { background: #edf2ff; }
+.swm-gcal-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  background: #f7f9ff;
+  border-left: 1px solid #e5eaf8;
+  color: #888;
+  cursor: pointer;
+  transition: background .12s, color .12s;
+  text-decoration: none;
+  flex-shrink: 0;
+}
+.swm-gcal-btn:hover { background: #e8f0fe; color: #1a56db; }
 .swm-item-type {
   font-size: 10px;
   color: #fff;
