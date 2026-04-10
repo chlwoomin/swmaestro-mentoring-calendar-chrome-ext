@@ -1,6 +1,11 @@
 (() => {
-  const HISTORY_URL = 'https://www.swmaestro.ai/sw/mypage/userAnswer/history.do?menuNo=200047';
+  const HISTORY_URL = `${location.origin}/sw/mypage/userAnswer/history.do?menuNo=200047`;
   const CACHE_KEY   = 'swm_lectures';
+  const SYNC_KEY    = 'swm_synced_gcal'; // { [lectureKey]: gcalEventId }
+
+  function getLectureKey(l) { return l.href || `${l.date}|${l.title}`; }
+  function getSyncedMap()   { try { return JSON.parse(localStorage.getItem(SYNC_KEY) || '{}'); } catch { return {}; } }
+  function saveSyncedMap(m) { localStorage.setItem(SYNC_KEY, JSON.stringify(m)); }
 
   // ── 1. 파싱 ────────────────────────────────────────────────────
   function parseRows(doc) {
@@ -131,7 +136,104 @@
       </div>`).join('')}`;
   }
 
-  // ── 6. UI 마운트 ────────────────────────────────────────────────
+  // ── 6. 구글 캘린더 API ──────────────────────────────────────────
+  async function createGcalEvent(token, l) {
+    const [startTime, endTime] = l.time ? l.time.split('~').map(s => s.trim()) : [null, null];
+    let start, end;
+    if (startTime && endTime) {
+      const pad = t => t.padStart(5, '0');
+      start = { dateTime: `${l.date}T${pad(startTime)}:00`, timeZone: 'Asia/Seoul' };
+      end   = { dateTime: `${l.date}T${pad(endTime)}:00`,   timeZone: 'Asia/Seoul' };
+    } else {
+      const nextDay = new Date(l.date);
+      nextDay.setDate(nextDay.getDate() + 1);
+      start = { date: l.date };
+      end   = { date: nextDay.toISOString().slice(0, 10) };
+    }
+    const res = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        summary: `[소마] ${l.title}`,
+        description: `${l.type} · ${l.author}\n${l.href}`,
+        start, end,
+      }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    return data.id; // 구글 캘린더 이벤트 ID
+  }
+
+  async function deleteGcalEvent(token, eventId) {
+    const res = await fetch(
+      `https://www.googleapis.com/calendar/v3/calendars/primary/events/${eventId}`,
+      { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (!res.ok && res.status !== 410) throw new Error(`HTTP ${res.status}`);
+  }
+
+  async function getTokenSilent() {
+    return new Promise(resolve => {
+      chrome.runtime.sendMessage({ type: 'GET_AUTH_TOKEN', interactive: false }, res => {
+        if (chrome.runtime.lastError || res?.error || !res?.token) resolve(null);
+        else resolve(res.token);
+      });
+    });
+  }
+
+  async function autoSync(lectures) {
+    const syncedMap = getSyncedMap();
+    if (Object.keys(syncedMap).length === 0) return; // 수동 싱크 전엔 실행 안 함
+
+    const currentKeys  = new Set(lectures.map(getLectureKey));
+    const newLectures  = lectures.filter(l => !syncedMap[getLectureKey(l)]);
+    const removedKeys  = Object.keys(syncedMap).filter(k => !currentKeys.has(k));
+    if (!newLectures.length && !removedKeys.length) return;
+
+    const token = await getTokenSilent();
+    if (!token) return;
+
+    const newMap = { ...syncedMap };
+    let added = 0, deleted = 0;
+
+    for (const l of newLectures) {
+      try { newMap[getLectureKey(l)] = await createGcalEvent(token, l); added++; } catch {}
+    }
+    for (const key of removedKeys) {
+      try { await deleteGcalEvent(token, syncedMap[key]); delete newMap[key]; deleted++; } catch {}
+    }
+
+    saveSyncedMap(newMap);
+
+    const msgs = [];
+    if (added)   msgs.push(`+${added}개 추가`);
+    if (deleted) msgs.push(`${deleted}개 삭제`);
+    if (msgs.length) showFabBadge(msgs.join(' · '));
+  }
+
+  function showFabBadge(text) {
+    document.getElementById('swm-fab-badge')?.remove();
+    const root = document.getElementById('swm-ext-root');
+    if (!root) return;
+    const badge = document.createElement('span');
+    badge.id = 'swm-fab-badge';
+    badge.textContent = text;
+    root.appendChild(badge);
+    setTimeout(() => badge.remove(), 5000);
+  }
+
+  // ── 7. 토스트 알림 ──────────────────────────────────────────────
+  function showToast(msg, type = 'ok') {
+    document.getElementById('swm-toast')?.remove();
+    const t = document.createElement('div');
+    t.id = 'swm-toast';
+    t.className = type === 'ok' ? 'swm-toast-ok' : 'swm-toast-err';
+    t.textContent = msg;
+    document.getElementById('swm-popup').appendChild(t);
+    setTimeout(() => t.remove(), 3000);
+  }
+
+  // ── 8. UI 마운트 ────────────────────────────────────────────────
   function mount(lectures) {
     document.getElementById('swm-ext-root')?.remove();
 
@@ -160,6 +262,14 @@
     header.className = 'swm-popup-header';
     header.innerHTML = `<span>📅 접수 강의 달력</span>
       <div class="swm-header-btns">
+        <button id="swm-gcal-all" title="구글 캘린더에 전체 추가">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2">
+            <rect x="3" y="4" width="18" height="18" rx="2"/>
+            <line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/>
+            <line x1="3" y1="10" x2="21" y2="10"/>
+            <line x1="12" y1="14" x2="12" y2="18"/><line x1="10" y1="16" x2="14" y2="16"/>
+          </svg>
+        </button>
         <button id="swm-refresh" title="새로고침">↻</button>
         <button id="swm-close" title="닫기">✕</button>
       </div>`;
@@ -215,16 +325,68 @@
 
     document.getElementById('swm-close').onclick = closePopup;
 
+    let gcalSynced = false;
+
+    document.getElementById('swm-gcal-all').onclick = async () => {
+      if (gcalSynced && !confirm('이미 추가된 일정입니다. 다시 추가하면 중복됩니다. 계속할까요?')) return;
+
+      const btn = document.getElementById('swm-gcal-all');
+      const originalHTML = btn.innerHTML;
+      btn.disabled = true;
+      btn.textContent = `0/${lectures.length}`;
+      btn.style.fontSize = '10px';
+
+      try {
+        // 1. background에서 토큰만 받아옴
+        const token = await new Promise((resolve, reject) => {
+          chrome.runtime.sendMessage({ type: 'GET_AUTH_TOKEN' }, res => {
+            if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+            else if (res.error) reject(new Error(res.error));
+            else resolve(res.token);
+          });
+        });
+
+        // 2. content script에서 직접 API 호출 + 진행 업데이트
+        const total = lectures.length;
+        let added = 0, failed = 0;
+        const syncedMap = getSyncedMap();
+        for (const l of lectures) {
+          try {
+            syncedMap[getLectureKey(l)] = await createGcalEvent(token, l);
+            added++;
+          } catch (e) {
+            failed++;
+          }
+          btn.textContent = `${added + failed}/${total}`;
+        }
+        saveSyncedMap(syncedMap);
+        gcalSynced = true;
+        showToast(
+          `✓ ${added}개 추가됨${failed ? ` (${failed}개 실패)` : ''}`,
+          'ok'
+        );
+      } catch (e) {
+        console.error('[소마 달력] 전체 추가 실패:', e);
+        showToast(`✗ ${e.message || '연동 중 오류 발생'}`, 'err');
+      }
+
+      btn.disabled = false;
+      btn.innerHTML = originalHTML;
+      btn.style.fontSize = '';
+    };
+
     document.getElementById('swm-refresh').onclick = async () => {
       const btn = document.getElementById('swm-refresh');
       btn.classList.add('spinning'); btn.disabled = true;
       lectures = await loadLectures(true);
       btn.classList.remove('spinning'); btn.disabled = false;
+      gcalSynced = false;
       render();
+      autoSync(lectures);
     };
   }
 
-  // ── 7. 로딩 FAB ─────────────────────────────────────────────────
+  // ── 8. 로딩 FAB ─────────────────────────────────────────────────
   function showLoader() {
     document.getElementById('swm-ext-root')?.remove();
     const root = document.createElement('div');
@@ -235,17 +397,20 @@
       <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
     </svg>`;
     root.appendChild(fab);
-    document.body.appendChild(root);
+    (document.body ?? document.documentElement).appendChild(root);
   }
 
-  // ── 8. 진입점 ────────────────────────────────────────────────────
+  // ── 9. 진입점 ────────────────────────────────────────────────────
   async function init() {
     if (!location.pathname.includes('/mypage/')) return;
     if (!sessionStorage.getItem(CACHE_KEY)) showLoader();
 
     try {
       const lectures = await loadLectures();
-      if (lectures.length) mount(lectures);
+      if (lectures.length) {
+        mount(lectures);
+        autoSync(lectures);
+      }
     } catch(e) {
       console.warn('[소마 달력] 초기화 실패:', e);
     }

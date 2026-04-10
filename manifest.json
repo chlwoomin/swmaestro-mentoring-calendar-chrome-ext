@@ -8,10 +8,24 @@
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
   },
+  "permissions": ["identity"],
+  "host_permissions": [
+    "https://www.googleapis.com/",
+    "*://www.swmaestro.ai/*",
+    "*://swmaestro.ai/*"
+  ],
+  "oauth2": {
+    "client_id": "1031697495484-p5epavs1sath3gu4c9clum5grg0e2cap.apps.googleusercontent.com",
+    "scopes": ["https://www.googleapis.com/auth/calendar.events"]
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
   "content_scripts": [
     {
       "matches": [
-        "*://www.swmaestro.ai/sw/mypage/*"
+        "*://www.swmaestro.ai/sw/mypage/*",
+        "*://swmaestro.ai/sw/mypage/*"
       ],
       "js": [
         "content.js"
