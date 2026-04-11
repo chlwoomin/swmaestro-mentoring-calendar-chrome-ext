@@ -8,13 +8,23 @@ function getAuthToken(interactive = true) {
       });
       return;
     }
-    // interactive: 캐시 먼저, 없으면 팝업
+    // interactive: 캐시 먼저 시도, 스코프 불일치 시 캐시 제거 후 재인증
     chrome.identity.getAuthToken({ interactive: false }, token => {
       if (!chrome.runtime.lastError && token) return resolve(token);
-      chrome.identity.getAuthToken({ interactive: true }, token2 => {
-        if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-        else resolve(token2);
-      });
+      // 캐시 토큰 제거 후 새 스코프로 재인증
+      if (token) {
+        chrome.identity.removeCachedAuthToken({ token }, () => {
+          chrome.identity.getAuthToken({ interactive: true }, token2 => {
+            if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+            else resolve(token2);
+          });
+        });
+      } else {
+        chrome.identity.getAuthToken({ interactive: true }, token2 => {
+          if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+          else resolve(token2);
+        });
+      }
     });
   });
 }

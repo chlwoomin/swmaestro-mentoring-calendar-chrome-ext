@@ -16,7 +16,10 @@
   ],
   "oauth2": {
     "client_id": "1031697495484-p5epavs1sath3gu4c9clum5grg0e2cap.apps.googleusercontent.com",
-    "scopes": ["https://www.googleapis.com/auth/calendar.events"]
+    "scopes": [
+      "https://www.googleapis.com/auth/calendar.events",
+      "https://www.googleapis.com/auth/calendar.readonly"
+    ]
   },
   "background": {
     "service_worker": "background.js"

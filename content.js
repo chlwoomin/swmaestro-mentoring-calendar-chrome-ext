@@ -1,11 +1,16 @@
 (() => {
   const HISTORY_URL = `${location.origin}/sw/mypage/userAnswer/history.do?menuNo=200047`;
   const CACHE_KEY   = 'swm_lectures';
-  const SYNC_KEY    = 'swm_synced_gcal'; // { [lectureKey]: gcalEventId }
+  const SYNC_KEY    = 'swm_synced_gcal'; // { [lectureKey]: { id, cal } }
+  const CAL_ID_KEY  = 'swm_gcal_cal_id'; // 선택된 캘린더 ID
 
   function getLectureKey(l) { return l.href || `${l.date}|${l.title}`; }
   function getSyncedMap()   { try { return JSON.parse(localStorage.getItem(SYNC_KEY) || '{}'); } catch { return {}; } }
   function saveSyncedMap(m) { localStorage.setItem(SYNC_KEY, JSON.stringify(m)); }
+  function getSavedCalId()  { return localStorage.getItem(CAL_ID_KEY) || 'primary'; }
+  function saveCalId(id)    { localStorage.setItem(CAL_ID_KEY, id); }
+  // 구형 포맷(string) 호환
+  function getEventInfo(v)  { return typeof v === 'string' ? { id: v, cal: 'primary' } : v; }
 
   // ── 1. 파싱 ────────────────────────────────────────────────────
   function parseRows(doc) {
@@ -150,7 +155,8 @@
       start = { date: l.date };
       end   = { date: nextDay.toISOString().slice(0, 10) };
     }
-    const res = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events', {
+    const calId = encodeURIComponent(getSavedCalId());
+    const res = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${calId}/events`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -161,15 +167,26 @@
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
-    return data.id; // 구글 캘린더 이벤트 ID
+    return { id: data.id, cal: getSavedCalId() };
   }
 
-  async function deleteGcalEvent(token, eventId) {
+  async function deleteGcalEvent(token, eventInfo) {
+    const { id, cal } = getEventInfo(eventInfo);
     const res = await fetch(
-      `https://www.googleapis.com/calendar/v3/calendars/primary/events/${eventId}`,
+      `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(cal)}/events/${id}`,
       { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } }
     );
     if (!res.ok && res.status !== 410) throw new Error(`HTTP ${res.status}`);
+  }
+
+  async function fetchCalendarList(token) {
+    const res = await fetch(
+      'https://www.googleapis.com/calendar/v3/users/me/calendarList?minAccessRole=writer',
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    return data.items || [];
   }
 
   async function getTokenSilent() {
@@ -200,7 +217,7 @@
       try { newMap[getLectureKey(l)] = await createGcalEvent(token, l); added++; } catch {}
     }
     for (const key of removedKeys) {
-      try { await deleteGcalEvent(token, syncedMap[key]); delete newMap[key]; deleted++; } catch {}
+      try { await deleteGcalEvent(token, getEventInfo(syncedMap[key])); delete newMap[key]; deleted++; } catch {}
     }
 
     saveSyncedMap(newMap);
@@ -275,6 +292,65 @@
       </div>`;
     popup.appendChild(header);
 
+    // 캘린더 선택 바
+    const calBar = document.createElement('div');
+    calBar.className = 'swm-cal-selector-bar';
+    const calSelect = document.createElement('select');
+    calSelect.id = 'swm-cal-select';
+    calSelect.innerHTML = `<option value="${getSavedCalId()}">${getSavedCalId() === 'primary' ? '기본 캘린더' : getSavedCalId()}</option>`;
+    const calLoadBtn = document.createElement('button');
+    calLoadBtn.id = 'swm-cal-load';
+    calLoadBtn.title = '캘린더 목록 불러오기';
+    calLoadBtn.textContent = '↻';
+    calBar.innerHTML = '<span>캘린더</span>';
+    calBar.appendChild(calSelect);
+    calBar.appendChild(calLoadBtn);
+    popup.appendChild(calBar);
+
+    // 선택 저장
+    calSelect.onchange = () => saveCalId(calSelect.value);
+
+    // 불러오기 버튼 클릭 시 인증 후 목록 로드
+    calLoadBtn.onclick = async () => {
+      calLoadBtn.disabled = true;
+      calLoadBtn.classList.add('spinning');
+      calListLoaded = false;
+      calSelect.innerHTML = '<option>불러오는 중...</option>';
+
+      try {
+        if (!chrome.runtime?.sendMessage) throw new Error('페이지를 새로고침 해주세요');
+        const token = await new Promise((resolve, reject) => {
+          chrome.runtime.sendMessage({ type: 'GET_AUTH_TOKEN' }, res => {
+            if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+            else if (res.error) reject(new Error(res.error));
+            else resolve(res.token);
+          });
+        });
+        await loadCalendarList(token);
+      } catch (e) {
+        console.error('[소마 달력] 캘린더 목록 로드 실패:', e);
+        calSelect.innerHTML = `<option value="${getSavedCalId()}">불러오기 실패 (${e.message})</option>`;
+      }
+
+      calLoadBtn.disabled = false;
+      calLoadBtn.classList.remove('spinning');
+    };
+
+    // 캘린더 목록 로드 (token을 받아서 호출)
+    let calListLoaded = false;
+    async function loadCalendarList(token) {
+      if (calListLoaded) return;
+      if (!token) token = await getTokenSilent();
+      if (!token) return; // 토큰 없으면 스킵 (다음 기회에 재시도)
+      calListLoaded = true;
+      const items = await fetchCalendarList(token); // 에러는 호출부로 전파
+      const saved = getSavedCalId();
+      calSelect.innerHTML = items
+        .map(c => `<option value="${c.id}" ${c.id === saved ? 'selected' : ''}>${c.summary}</option>`)
+        .join('');
+      if (!items.find(c => c.id === saved)) saveCalId(items[0]?.id || 'primary');
+    }
+
     // 달력 바디
     const calBody = document.createElement('div');
     calBody.id = 'swm-cal-body';
@@ -309,7 +385,7 @@
     render();
 
     // 팝업 열기/닫기
-    function openPopup()  { popup.classList.add('open'); }
+    function openPopup()  { popup.classList.add('open'); loadCalendarList(); }
     function closePopup() { popup.classList.remove('open'); }
 
     document.addEventListener('click', e => {
@@ -345,6 +421,9 @@
             else resolve(res.token);
           });
         });
+
+        // 토큰 확보 후 캘린더 목록 로드 (아직 안 된 경우)
+        loadCalendarList(token);
 
         // 2. content script에서 직접 API 호출 + 진행 업데이트
         const total = lectures.length;
