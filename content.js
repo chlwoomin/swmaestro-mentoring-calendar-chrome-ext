@@ -2,7 +2,38 @@
   const HISTORY_URL = `${location.origin}/sw/mypage/userAnswer/history.do?menuNo=200047`;
   const CACHE_KEY   = 'swm_lectures';
   const SYNC_KEY    = 'swm_synced_gcal'; // { [lectureKey]: { id, cal } }
-  const CAL_ID_KEY  = 'swm_gcal_cal_id'; // 선택된 캘린더 ID
+  const CAL_ID_KEY      = 'swm_gcal_cal_id'; // 선택된 캘린더 ID
+  const TITLE_FORMAT_KEY  = 'swm_title_format';
+  const DEFAULT_FORMAT    = '[소마] {title}';
+  const FORMAT_SYNCED_KEY = 'swm_synced_format'; // 마지막으로 동기화에 사용된 형식
+
+  function getTitleFormat()    { return localStorage.getItem(TITLE_FORMAT_KEY)  || DEFAULT_FORMAT; }
+  function saveTitleFormat(f)  { localStorage.setItem(TITLE_FORMAT_KEY, f); }
+  function getSyncedFormat()   { return localStorage.getItem(FORMAT_SYNCED_KEY) || ''; }
+  function saveSyncedFormat(f) { localStorage.setItem(FORMAT_SYNCED_KEY, f); }
+
+  const locationCache = new Map(); // href → 장소 문자열 (메모리 캐시)
+
+  async function getLocationFor(l) {
+    if (!l.href || l.href === '#') return '';
+    if (locationCache.has(l.href)) return locationCache.get(l.href);
+    try {
+      const res  = await fetch(l.href, { credentials: 'include' });
+      const html = await res.text();
+      const doc  = new DOMParser().parseFromString(html, 'text/html');
+      let loc = '';
+      doc.querySelectorAll('.bbs-view-new .group').forEach(g => {
+        if (g.querySelector('.t')?.textContent.trim() === '장소') {
+          loc = g.querySelector('.c')?.textContent.trim() || '';
+        }
+      });
+      locationCache.set(l.href, loc);
+      return loc;
+    } catch {
+      locationCache.set(l.href, '');
+      return '';
+    }
+  }
 
   function getLectureKey(l) { return l.href || `${l.date}|${l.title}`; }
   function getSyncedMap()   { try { return JSON.parse(localStorage.getItem(SYNC_KEY) || '{}'); } catch { return {}; } }
@@ -108,12 +139,23 @@
     return { html, map };
   }
 
-  // ── 4. 구글 캘린더 URL 생성 ──────────────────────────────────────
+  // ── 4. 이벤트 제목 포맷 ─────────────────────────────────────────
+  function formatEventTitle(l) {
+    return getTitleFormat()
+      .replace('{title}',    l.title)
+      .replace('{type}',     l.type)
+      .replace('{author}',   l.author)
+      .replace('{date}',     l.date)
+      .replace('{time}',     l.time     || '')
+      .replace('{location}', l.location || '');
+  }
+
+  // ── 5. 구글 캘린더 URL 생성 ──────────────────────────────────────
   function googleCalUrl(l) {
     const [start, end] = l.time.split('~').map(s => s.trim());
     const fmt = (t) => l.date.replace(/-/g, '') + 'T' + t.split(':').map(v => v.padStart(2,'0')).join('') + '00';
     const dates = start && end ? `${fmt(start)}/${fmt(end)}` : l.date.replace(/-/g, '');
-    const text = encodeURIComponent(`[소마] ${l.title}`);
+    const text = encodeURIComponent(formatEventTitle(l));
     const details = encodeURIComponent(`${l.type} · ${l.author}\n${l.href}`);
     return `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${text}&dates=${dates}&details=${details}`;
   }
@@ -143,6 +185,9 @@
 
   // ── 6. 구글 캘린더 API ──────────────────────────────────────────
   async function createGcalEvent(token, l) {
+    const location = await getLocationFor(l);
+    const lWithLoc = { ...l, location };
+
     const [startTime, endTime] = l.time ? l.time.split('~').map(s => s.trim()) : [null, null];
     let start, end;
     if (startTime && endTime) {
@@ -156,18 +201,37 @@
       end   = { date: nextDay.toISOString().slice(0, 10) };
     }
     const calId = encodeURIComponent(getSavedCalId());
+    const body  = {
+      summary:     formatEventTitle(lWithLoc),
+      description: `${l.type} · ${l.author}\n${l.href}`,
+      start, end,
+    };
+    if (location) body.location = location;
     const res = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${calId}/events`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        summary: `[소마] ${l.title}`,
-        description: `${l.type} · ${l.author}\n${l.href}`,
-        start, end,
-      }),
+      body: JSON.stringify(body),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     return { id: data.id, cal: getSavedCalId() };
+  }
+
+  async function updateGcalEvent(token, eventInfo, l) {
+    const location = await getLocationFor(l);
+    const lWithLoc = { ...l, location };
+    const { id, cal } = getEventInfo(eventInfo);
+    const body = { summary: formatEventTitle(lWithLoc) };
+    if (location) body.location = location;
+    const res = await fetch(
+      `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(cal)}/events/${id}`,
+      {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }
+    );
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
   }
 
   async function deleteGcalEvent(token, eventInfo) {
@@ -202,16 +266,19 @@
     const syncedMap = getSyncedMap();
     if (Object.keys(syncedMap).length === 0) return; // 수동 싱크 전엔 실행 안 함
 
-    const currentKeys  = new Set(lectures.map(getLectureKey));
-    const newLectures  = lectures.filter(l => !syncedMap[getLectureKey(l)]);
-    const removedKeys  = Object.keys(syncedMap).filter(k => !currentKeys.has(k));
-    if (!newLectures.length && !removedKeys.length) return;
+    const currentKeys     = new Set(lectures.map(getLectureKey));
+    const newLectures     = lectures.filter(l => !syncedMap[getLectureKey(l)]);
+    const removedKeys     = Object.keys(syncedMap).filter(k => !currentKeys.has(k));
+    const formatChanged   = getTitleFormat() !== getSyncedFormat();
+    const updateLectures  = formatChanged ? lectures.filter(l => syncedMap[getLectureKey(l)]) : [];
+
+    if (!newLectures.length && !removedKeys.length && !updateLectures.length) return;
 
     const token = await getTokenSilent();
     if (!token) return;
 
     const newMap = { ...syncedMap };
-    let added = 0, deleted = 0;
+    let added = 0, deleted = 0, updated = 0;
 
     for (const l of newLectures) {
       try { newMap[getLectureKey(l)] = await createGcalEvent(token, l); added++; } catch {}
@@ -219,12 +286,17 @@
     for (const key of removedKeys) {
       try { await deleteGcalEvent(token, getEventInfo(syncedMap[key])); delete newMap[key]; deleted++; } catch {}
     }
+    for (const l of updateLectures) {
+      try { await updateGcalEvent(token, syncedMap[getLectureKey(l)], l); updated++; } catch {}
+    }
 
     saveSyncedMap(newMap);
+    if (formatChanged) saveSyncedFormat(getTitleFormat());
 
     const msgs = [];
     if (added)   msgs.push(`+${added}개 추가`);
     if (deleted) msgs.push(`${deleted}개 삭제`);
+    if (updated) msgs.push(`제목 ${updated}개 업데이트`);
     if (msgs.length) showFabBadge(msgs.join(' · '));
   }
 
@@ -306,6 +378,39 @@
     calBar.appendChild(calSelect);
     calBar.appendChild(calLoadBtn);
     popup.appendChild(calBar);
+
+    // 제목 형식 설정 바
+    const titleBar = document.createElement('div');
+    titleBar.className = 'swm-title-format-bar';
+    const titleInput = document.createElement('input');
+    titleInput.id = 'swm-title-input';
+    titleInput.type = 'text';
+    titleInput.value = getTitleFormat();
+    titleInput.placeholder = DEFAULT_FORMAT;
+    const titleHelp = document.createElement('button');
+    titleHelp.id = 'swm-title-help';
+    titleHelp.title = '사용 가능한 변수 보기';
+    titleHelp.textContent = '?';
+    const titleTooltip = document.createElement('div');
+    titleTooltip.className = 'swm-title-tooltip';
+    titleTooltip.innerHTML =
+      '<b>사용 가능한 변수</b><br>' +
+      '{title} — 강의명<br>{type} — 유형<br>{author} — 강사명<br>' +
+      '{date} — 날짜<br>{time} — 시간<br>{location} — 장소';
+    titleTooltip.style.display = 'none';
+    titleBar.innerHTML = '<span>제목 형식</span>';
+    titleBar.appendChild(titleInput);
+    titleBar.appendChild(titleHelp);
+    titleBar.appendChild(titleTooltip);
+    popup.appendChild(titleBar);
+
+    titleInput.addEventListener('blur', () => saveTitleFormat(titleInput.value || DEFAULT_FORMAT));
+    titleInput.addEventListener('keydown', e => { if (e.key === 'Enter') titleInput.blur(); });
+    titleHelp.addEventListener('click', e => {
+      e.stopPropagation();
+      titleTooltip.style.display = titleTooltip.style.display === 'none' ? 'block' : 'none';
+    });
+    popup.addEventListener('click', () => { titleTooltip.style.display = 'none'; });
 
     // 선택 저장
     calSelect.onchange = () => saveCalId(calSelect.value);
@@ -404,7 +509,7 @@
     let gcalSynced = false;
 
     document.getElementById('swm-gcal-all').onclick = async () => {
-      if (gcalSynced && !confirm('이미 추가된 일정입니다. 다시 추가하면 중복됩니다. 계속할까요?')) return;
+      // 이미 동기화된 경우 업데이트 모드로 진행 (중복 없음)
 
       const btn = document.getElementById('swm-gcal-all');
       const originalHTML = btn.innerHTML;
@@ -427,23 +532,30 @@
 
         // 2. content script에서 직접 API 호출 + 진행 업데이트
         const total = lectures.length;
-        let added = 0, failed = 0;
+        let added = 0, updated = 0, failed = 0;
         const syncedMap = getSyncedMap();
         for (const l of lectures) {
+          const key = getLectureKey(l);
           try {
-            syncedMap[getLectureKey(l)] = await createGcalEvent(token, l);
-            added++;
+            if (syncedMap[key]) {
+              await updateGcalEvent(token, syncedMap[key], l); // 기존 이벤트 제목 업데이트
+              updated++;
+            } else {
+              syncedMap[key] = await createGcalEvent(token, l);
+              added++;
+            }
           } catch (e) {
             failed++;
           }
-          btn.textContent = `${added + failed}/${total}`;
+          btn.textContent = `${added + updated + failed}/${total}`;
         }
         saveSyncedMap(syncedMap);
+        saveSyncedFormat(getTitleFormat());
         gcalSynced = true;
-        showToast(
-          `✓ ${added}개 추가됨${failed ? ` (${failed}개 실패)` : ''}`,
-          'ok'
-        );
+        const parts = [];
+        if (added)   parts.push(`${added}개 추가`);
+        if (updated) parts.push(`${updated}개 업데이트`);
+        showToast(`✓ ${parts.join(', ')}${failed ? ` (${failed}개 실패)` : ''}`, 'ok');
       } catch (e) {
         console.error('[소마 달력] 전체 추가 실패:', e);
         showToast(`✗ ${e.message || '연동 중 오류 발생'}`, 'err');
