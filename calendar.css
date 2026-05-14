@@ -398,6 +398,7 @@
   pointer-events: none;
   z-index: 99999;
 }
+#swm-fab-badge.swm-fab-badge-err { background: #e53e3e; }
 
 /* ── 토스트 알림 ─────────────────────────────────────── */
 #swm-toast {

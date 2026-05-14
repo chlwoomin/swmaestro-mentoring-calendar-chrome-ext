@@ -1,11 +1,12 @@
 (() => {
   const HISTORY_URL = `${location.origin}/sw/mypage/userAnswer/history.do?menuNo=200047`;
   const CACHE_KEY   = 'swm_lectures';
-  const SYNC_KEY    = 'swm_synced_gcal'; // { [lectureKey]: { id, cal } }
+  const SYNC_KEY    = 'swm_synced_gcal'; // { [lectureKey]: { id, cal } } — 캐시 (source of truth는 GCal extendedProperties)
   const CAL_ID_KEY      = 'swm_gcal_cal_id'; // 선택된 캘린더 ID
   const TITLE_FORMAT_KEY  = 'swm_title_format';
   const DEFAULT_FORMAT    = '[소마] {title}';
   const FORMAT_SYNCED_KEY = 'swm_synced_format'; // 마지막으로 동기화에 사용된 형식
+  const SWM_APP_ID = 'soma-cal'; // GCal extendedProperties.private.swmAppId 식별자
 
   function getTitleFormat()    { return localStorage.getItem(TITLE_FORMAT_KEY)  || DEFAULT_FORMAT; }
   function saveTitleFormat(f)  { localStorage.setItem(TITLE_FORMAT_KEY, f); }
@@ -184,128 +185,253 @@
   }
 
   // ── 6. 구글 캘린더 API ──────────────────────────────────────────
-  async function createGcalEvent(token, l) {
-    const location = await getLocationFor(l);
-    const lWithLoc = { ...l, location };
-
+  function buildStartEnd(l) {
     const [startTime, endTime] = l.time ? l.time.split('~').map(s => s.trim()) : [null, null];
-    let start, end;
     if (startTime && endTime) {
       const pad = t => t.padStart(5, '0');
-      start = { dateTime: `${l.date}T${pad(startTime)}:00`, timeZone: 'Asia/Seoul' };
-      end   = { dateTime: `${l.date}T${pad(endTime)}:00`,   timeZone: 'Asia/Seoul' };
-    } else {
-      const nextDay = new Date(l.date);
-      nextDay.setDate(nextDay.getDate() + 1);
-      start = { date: l.date };
-      end   = { date: nextDay.toISOString().slice(0, 10) };
+      return {
+        start: { dateTime: `${l.date}T${pad(startTime)}:00`, timeZone: 'Asia/Seoul' },
+        end:   { dateTime: `${l.date}T${pad(endTime)}:00`,   timeZone: 'Asia/Seoul' },
+      };
     }
-    const calId = encodeURIComponent(getSavedCalId());
-    const body  = {
-      summary:     formatEventTitle(lWithLoc),
-      description: `${l.type} · ${l.author}\n${l.href}`,
-      start, end,
-    };
-    if (location) body.location = location;
-    const res = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${calId}/events`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    return { id: data.id, cal: getSavedCalId() };
+    const nextDay = new Date(l.date);
+    nextDay.setDate(nextDay.getDate() + 1);
+    return { start: { date: l.date }, end: { date: nextDay.toISOString().slice(0, 10) } };
   }
 
-  async function updateGcalEvent(token, eventInfo, l) {
-    const location = await getLocationFor(l);
-    const lWithLoc = { ...l, location };
-    const { id, cal } = getEventInfo(eventInfo);
-    const body = { summary: formatEventTitle(lWithLoc) };
-    if (location) body.location = location;
-    const res = await fetch(
-      `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(cal)}/events/${id}`,
-      {
-        method: 'PATCH',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      }
-    );
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  }
-
-  async function deleteGcalEvent(token, eventInfo) {
-    const { id, cal } = getEventInfo(eventInfo);
-    const res = await fetch(
-      `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(cal)}/events/${id}`,
-      { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } }
-    );
-    if (!res.ok && res.status !== 410) throw new Error(`HTTP ${res.status}`);
-  }
-
-  async function fetchCalendarList(token) {
-    const res = await fetch(
-      'https://www.googleapis.com/calendar/v3/users/me/calendarList?minAccessRole=writer',
-      { headers: { Authorization: `Bearer ${token}` } }
-    );
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    return data.items || [];
-  }
-
-  async function getTokenSilent() {
-    return new Promise(resolve => {
-      chrome.runtime.sendMessage({ type: 'GET_AUTH_TOKEN', interactive: false }, res => {
-        if (chrome.runtime.lastError || res?.error || !res?.token) resolve(null);
+  // 토큰 발급/무효화 (background 메시지)
+  function requestAuthToken(interactive) {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage({ type: 'GET_AUTH_TOKEN', interactive }, res => {
+        if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+        else if (res?.error) reject(new Error(res.error));
         else resolve(res.token);
       });
     });
   }
+  function invalidateAuthToken(token) {
+    return new Promise(resolve => {
+      if (!token) return resolve();
+      chrome.runtime.sendMessage({ type: 'INVALIDATE_AUTH_TOKEN', token }, () => resolve());
+    });
+  }
+  async function getTokenSilent() {
+    try { return await requestAuthToken(false); } catch { return null; }
+  }
+
+  // 401 1회 재시도가 포함된 fetch 래퍼. client는 { token, interactive } 형태로 호출자가 보유.
+  async function gcalFetch(client, url, init = {}) {
+    const doFetch = () => fetch(url, {
+      ...init,
+      headers: { ...(init.headers || {}), Authorization: `Bearer ${client.token}` },
+    });
+    let res = await doFetch();
+    if (res.status === 401) {
+      await invalidateAuthToken(client.token);
+      try {
+        client.token = await requestAuthToken(client.interactive);
+      } catch (e) {
+        throw new Error('인증 만료 후 재인증 실패: ' + e.message);
+      }
+      res = await doFetch();
+    }
+    return res;
+  }
+
+  async function createGcalEvent(client, l) {
+    const location = await getLocationFor(l);
+    const lWithLoc = { ...l, location };
+    const { start, end } = buildStartEnd(l);
+    const calId = getSavedCalId();
+    const body = {
+      summary:     formatEventTitle(lWithLoc),
+      description: `${l.type} · ${l.author}\n${l.href}`,
+      location:    location || '',
+      start, end,
+      extendedProperties: {
+        private: { swmAppId: SWM_APP_ID, swmKey: getLectureKey(l) },
+      },
+    };
+    const res = await gcalFetch(client,
+      `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calId)}/events`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }
+    );
+    if (!res.ok) throw new Error(`HTTP ${res.status} (create)`);
+    const data = await res.json();
+    return { id: data.id, cal: calId };
+  }
+
+  async function updateGcalEvent(client, eventInfo, l) {
+    const location = await getLocationFor(l);
+    const lWithLoc = { ...l, location };
+    const { id, cal } = getEventInfo(eventInfo);
+    const { start, end } = buildStartEnd(l);
+    const body = {
+      summary:  formatEventTitle(lWithLoc),
+      location: location || '',
+      start, end,
+      extendedProperties: {
+        private: { swmAppId: SWM_APP_ID, swmKey: getLectureKey(l) },
+      },
+    };
+    const res = await gcalFetch(client,
+      `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(cal)}/events/${id}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }
+    );
+    if (!res.ok) throw new Error(`HTTP ${res.status} (update)`);
+  }
+
+  async function deleteGcalEvent(client, eventInfo) {
+    const { id, cal } = getEventInfo(eventInfo);
+    const res = await gcalFetch(client,
+      `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(cal)}/events/${id}`,
+      { method: 'DELETE' }
+    );
+    if (!res.ok && res.status !== 410 && res.status !== 404) {
+      throw new Error(`HTTP ${res.status} (delete)`);
+    }
+  }
+
+  async function fetchCalendarList(client) {
+    const res = await gcalFetch(client,
+      'https://www.googleapis.com/calendar/v3/users/me/calendarList?minAccessRole=writer'
+    );
+    if (!res.ok) throw new Error(`HTTP ${res.status} (calendarList)`);
+    const data = await res.json();
+    return data.items || [];
+  }
+
+  // 현재 캘린더에서 이 익스텐션이 만든 이벤트만 조회해 swmKey → { id, cal } 맵으로 반환
+  async function fetchRemoteEventMap(client, calId) {
+    const map = {};
+    let pageToken = '';
+    do {
+      const url = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calId)}/events`
+        + `?privateExtendedProperty=${encodeURIComponent('swmAppId=' + SWM_APP_ID)}`
+        + `&showDeleted=false&maxResults=2500&singleEvents=true`
+        + (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : '');
+      const res = await gcalFetch(client, url);
+      if (!res.ok) throw new Error(`HTTP ${res.status} (list)`);
+      const data = await res.json();
+      for (const ev of (data.items || [])) {
+        const key = ev.extendedProperties?.private?.swmKey;
+        if (key) map[key] = { id: ev.id, cal: calId };
+      }
+      pageToken = data.nextPageToken || '';
+    } while (pageToken);
+    return map;
+  }
+
+  // 마이그레이션: extendedProperties가 없는 옛 이벤트에 swmAppId/swmKey 부여
+  async function migrateLegacyEvents(client, currentCalId, syncedMap) {
+    const migratedMap = {};
+    for (const [key, info] of Object.entries(syncedMap)) {
+      const { id, cal } = getEventInfo(info);
+      if (cal !== currentCalId) continue; // 다른 캘린더 항목은 건너뜀
+      try {
+        const res = await gcalFetch(client,
+          `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(cal)}/events/${id}`,
+          {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              extendedProperties: { private: { swmAppId: SWM_APP_ID, swmKey: key } },
+            }),
+          }
+        );
+        if (res.ok) {
+          migratedMap[key] = { id, cal };
+        } else if (res.status !== 404 && res.status !== 410) {
+          console.warn('[소마 달력] 마이그레이션 실패:', key, res.status);
+        }
+      } catch (e) {
+        console.warn('[소마 달력] 마이그레이션 실패:', key, e);
+      }
+    }
+    return migratedMap;
+  }
 
   async function autoSync(lectures) {
-    const syncedMap = getSyncedMap();
-    if (Object.keys(syncedMap).length === 0) return; // 수동 싱크 전엔 실행 안 함
-
-    const currentKeys     = new Set(lectures.map(getLectureKey));
-    const newLectures     = lectures.filter(l => !syncedMap[getLectureKey(l)]);
-    const removedKeys     = Object.keys(syncedMap).filter(k => !currentKeys.has(k));
-    const formatChanged   = getTitleFormat() !== getSyncedFormat();
-    const updateLectures  = formatChanged ? lectures.filter(l => syncedMap[getLectureKey(l)]) : [];
-
-    if (!newLectures.length && !removedKeys.length && !updateLectures.length) return;
-
     const token = await getTokenSilent();
     if (!token) return;
+    const client = { token, interactive: false };
+    const calId  = getSavedCalId();
 
-    const newMap = { ...syncedMap };
-    let added = 0, deleted = 0, updated = 0;
+    let remoteMap;
+    try {
+      remoteMap = await fetchRemoteEventMap(client, calId);
+    } catch (e) {
+      console.warn('[소마 달력] 자동 동기화 list 실패:', e);
+      showFabBadge('자동 동기화 실패', 'err');
+      return;
+    }
+
+    const syncedMap   = getSyncedMap();
+    const remoteEmpty = Object.keys(remoteMap).length === 0;
+    const syncedEmpty = Object.keys(syncedMap).length === 0;
+
+    // 미연동 사용자 → 종료
+    if (remoteEmpty && syncedEmpty) return;
+
+    // 마이그레이션 전 상태 (옛 syncedMap만 있고 GCal에는 마커 없음) → 자동 sync는 위험하므로 종료
+    if (remoteEmpty && !syncedEmpty) {
+      showFabBadge('전체 추가 버튼을 한 번 더 눌러주세요', 'err');
+      return;
+    }
+
+    const currentKeys    = new Set(lectures.map(getLectureKey));
+    const newLectures    = lectures.filter(l => !remoteMap[getLectureKey(l)]);
+    const removedKeys    = Object.keys(remoteMap).filter(k => !currentKeys.has(k));
+    const formatChanged  = getTitleFormat() !== getSyncedFormat();
+    const updateLectures = formatChanged ? lectures.filter(l => remoteMap[getLectureKey(l)]) : [];
+
+    if (!newLectures.length && !removedKeys.length && !updateLectures.length) {
+      saveSyncedMap(remoteMap); // 캐시는 항상 최신화
+      return;
+    }
+
+    const newMap = { ...remoteMap };
+    let added = 0, deleted = 0, updated = 0, failed = 0;
 
     for (const l of newLectures) {
-      try { newMap[getLectureKey(l)] = await createGcalEvent(token, l); added++; } catch {}
+      try { newMap[getLectureKey(l)] = await createGcalEvent(client, l); added++; }
+      catch (e) { console.warn('[소마 달력] 자동 동기화 추가 실패:', l.title, e); failed++; }
     }
     for (const key of removedKeys) {
-      try { await deleteGcalEvent(token, getEventInfo(syncedMap[key])); delete newMap[key]; deleted++; } catch {}
+      try { await deleteGcalEvent(client, remoteMap[key]); delete newMap[key]; deleted++; }
+      catch (e) { console.warn('[소마 달력] 자동 동기화 삭제 실패:', key, e); failed++; }
     }
     for (const l of updateLectures) {
-      try { await updateGcalEvent(token, syncedMap[getLectureKey(l)], l); updated++; } catch {}
+      try { await updateGcalEvent(client, remoteMap[getLectureKey(l)], l); updated++; }
+      catch (e) { console.warn('[소마 달력] 자동 동기화 업데이트 실패:', l.title, e); failed++; }
     }
 
     saveSyncedMap(newMap);
-    if (formatChanged) saveSyncedFormat(getTitleFormat());
+    if (formatChanged && !failed) saveSyncedFormat(getTitleFormat());
 
     const msgs = [];
     if (added)   msgs.push(`+${added}개 추가`);
     if (deleted) msgs.push(`${deleted}개 삭제`);
     if (updated) msgs.push(`제목 ${updated}개 업데이트`);
-    if (msgs.length) showFabBadge(msgs.join(' · '));
+    if (failed)  msgs.push(`${failed}개 실패`);
+    if (msgs.length) showFabBadge(msgs.join(' · '), failed ? 'err' : 'ok');
   }
 
-  function showFabBadge(text) {
+  function showFabBadge(text, kind = 'ok') {
     document.getElementById('swm-fab-badge')?.remove();
     const root = document.getElementById('swm-ext-root');
     if (!root) return;
     const badge = document.createElement('span');
     badge.id = 'swm-fab-badge';
+    if (kind === 'err') badge.classList.add('swm-fab-badge-err');
     badge.textContent = text;
     root.appendChild(badge);
     setTimeout(() => badge.remove(), 5000);
@@ -412,8 +538,16 @@
     });
     popup.addEventListener('click', () => { titleTooltip.style.display = 'none'; });
 
-    // 선택 저장
-    calSelect.onchange = () => saveCalId(calSelect.value);
+    // 캘린더 변경 시: 캐시 무효화 + 안내
+    calSelect.onchange = () => {
+      const newId = calSelect.value;
+      const oldId = getSavedCalId();
+      saveCalId(newId);
+      if (newId !== oldId) {
+        localStorage.removeItem(SYNC_KEY); // stale 캐시 제거 (옛 캘린더 이벤트는 그대로 남음)
+        showToast('캘린더를 변경했습니다. 이전 캘린더 이벤트는 유지되며, 새 캘린더에 추가하려면 전체 추가 버튼을 누르세요.', 'ok');
+      }
+    };
 
     // 불러오기 버튼 클릭 시 인증 후 목록 로드
     calLoadBtn.onclick = async () => {
@@ -424,14 +558,8 @@
 
       try {
         if (!chrome.runtime?.sendMessage) throw new Error('페이지를 새로고침 해주세요');
-        const token = await new Promise((resolve, reject) => {
-          chrome.runtime.sendMessage({ type: 'GET_AUTH_TOKEN' }, res => {
-            if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-            else if (res.error) reject(new Error(res.error));
-            else resolve(res.token);
-          });
-        });
-        await loadCalendarList(token);
+        const token = await requestAuthToken(true);
+        await loadCalendarList({ token, interactive: true });
       } catch (e) {
         console.error('[소마 달력] 캘린더 목록 로드 실패:', e);
         calSelect.innerHTML = `<option value="${getSavedCalId()}">불러오기 실패 (${e.message})</option>`;
@@ -441,14 +569,17 @@
       calLoadBtn.classList.remove('spinning');
     };
 
-    // 캘린더 목록 로드 (token을 받아서 호출)
+    // 캘린더 목록 로드 (client를 받아서 호출, 없으면 silent 토큰으로 시도)
     let calListLoaded = false;
-    async function loadCalendarList(token) {
+    async function loadCalendarList(client) {
       if (calListLoaded) return;
-      if (!token) token = await getTokenSilent();
-      if (!token) return; // 토큰 없으면 스킵 (다음 기회에 재시도)
+      if (!client) {
+        const token = await getTokenSilent();
+        if (!token) return; // 토큰 없으면 스킵 (다음 기회에 재시도)
+        client = { token, interactive: false };
+      }
       calListLoaded = true;
-      const items = await fetchCalendarList(token); // 에러는 호출부로 전파
+      const items = await fetchCalendarList(client); // 에러는 호출부로 전파
       const saved = getSavedCalId();
       calSelect.innerHTML = items
         .map(c => `<option value="${c.id}" ${c.id === saved ? 'selected' : ''}>${c.summary}</option>`)
@@ -506,11 +637,7 @@
 
     document.getElementById('swm-close').onclick = closePopup;
 
-    let gcalSynced = false;
-
     document.getElementById('swm-gcal-all').onclick = async () => {
-      // 이미 동기화된 경우 업데이트 모드로 진행 (중복 없음)
-
       const btn = document.getElementById('swm-gcal-all');
       const originalHTML = btn.innerHTML;
       btn.disabled = true;
@@ -518,44 +645,58 @@
       btn.style.fontSize = '10px';
 
       try {
-        // 1. background에서 토큰만 받아옴
-        const token = await new Promise((resolve, reject) => {
-          chrome.runtime.sendMessage({ type: 'GET_AUTH_TOKEN' }, res => {
-            if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-            else if (res.error) reject(new Error(res.error));
-            else resolve(res.token);
-          });
-        });
+        const token = await requestAuthToken(true);
+        const client = { token, interactive: true };
 
-        // 토큰 확보 후 캘린더 목록 로드 (아직 안 된 경우)
-        loadCalendarList(token);
+        // 캘린더 목록 (옵션). 실패해도 진행에 지장 없음.
+        loadCalendarList(client).catch(e => console.warn('[소마 달력] 캘린더 목록 로드 실패:', e));
 
-        // 2. content script에서 직접 API 호출 + 진행 업데이트
+        const calId = getSavedCalId();
+
+        // 1) GCal에서 우리 이벤트 조회 (source of truth)
+        let remoteMap = await fetchRemoteEventMap(client, calId);
+
+        // 2) 마이그레이션: remoteMap이 비었는데 localStorage에 옛 매핑이 있으면 extendedProperties 부여
+        const syncedMap = getSyncedMap();
+        if (Object.keys(remoteMap).length === 0 && Object.keys(syncedMap).length > 0) {
+          const migrated = await migrateLegacyEvents(client, calId, syncedMap);
+          Object.assign(remoteMap, migrated);
+        }
+
+        // 3) 본 동기화
         const total = lectures.length;
         let added = 0, updated = 0, failed = 0;
-        const syncedMap = getSyncedMap();
+        const failedTitles = [];
         for (const l of lectures) {
           const key = getLectureKey(l);
           try {
-            if (syncedMap[key]) {
-              await updateGcalEvent(token, syncedMap[key], l); // 기존 이벤트 제목 업데이트
+            if (remoteMap[key]) {
+              await updateGcalEvent(client, remoteMap[key], l);
               updated++;
             } else {
-              syncedMap[key] = await createGcalEvent(token, l);
+              remoteMap[key] = await createGcalEvent(client, l);
               added++;
             }
           } catch (e) {
+            console.warn('[소마 달력] 추가/업데이트 실패:', l.title, e);
             failed++;
+            if (failedTitles.length === 0) failedTitles.push(l.title);
           }
           btn.textContent = `${added + updated + failed}/${total}`;
         }
-        saveSyncedMap(syncedMap);
-        saveSyncedFormat(getTitleFormat());
-        gcalSynced = true;
+
+        saveSyncedMap(remoteMap);
+        if (!failed) saveSyncedFormat(getTitleFormat());
+
         const parts = [];
         if (added)   parts.push(`${added}개 추가`);
         if (updated) parts.push(`${updated}개 업데이트`);
-        showToast(`✓ ${parts.join(', ')}${failed ? ` (${failed}개 실패)` : ''}`, 'ok');
+        let failSuffix = '';
+        if (failed) {
+          const head = failedTitles[0] || '';
+          failSuffix = ` (${head}${failed > 1 ? ` 외 ${failed - 1}건` : ''} 실패)`;
+        }
+        showToast(`✓ ${parts.join(', ') || '변경 없음'}${failSuffix}`, failed ? 'err' : 'ok');
       } catch (e) {
         console.error('[소마 달력] 전체 추가 실패:', e);
         showToast(`✗ ${e.message || '연동 중 오류 발생'}`, 'err');
@@ -569,9 +710,12 @@
     document.getElementById('swm-refresh').onclick = async () => {
       const btn = document.getElementById('swm-refresh');
       btn.classList.add('spinning'); btn.disabled = true;
-      lectures = await loadLectures(true);
+      try {
+        lectures = await loadLectures(true);
+      } catch (e) {
+        console.warn('[소마 달력] 새로고침 실패:', e);
+      }
       btn.classList.remove('spinning'); btn.disabled = false;
-      gcalSynced = false;
       render();
       autoSync(lectures);
     };

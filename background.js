@@ -32,16 +32,26 @@ function getAuthToken(interactive = true) {
 
 // ── 메시지 리스너 ─────────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  if (msg.type !== 'GET_AUTH_TOKEN') return false;
+  if (msg.type === 'GET_AUTH_TOKEN') {
+    (async () => {
+      try {
+        const token = await getAuthToken(msg.interactive !== false);
+        sendResponse({ token });
+      } catch (e) {
+        sendResponse({ error: e.message });
+      }
+    })();
+    return true;
+  }
 
-  (async () => {
-    try {
-      const token = await getAuthToken(msg.interactive !== false);
-      sendResponse({ token });
-    } catch (e) {
-      sendResponse({ error: e.message });
+  if (msg.type === 'INVALIDATE_AUTH_TOKEN') {
+    if (msg.token) {
+      chrome.identity.removeCachedAuthToken({ token: msg.token }, () => sendResponse({ ok: true }));
+    } else {
+      sendResponse({ ok: false });
     }
-  })();
+    return true;
+  }
 
-  return true;
+  return false;
 });
